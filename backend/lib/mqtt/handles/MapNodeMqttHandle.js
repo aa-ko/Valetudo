@@ -1,13 +1,16 @@
+const BufferWriteStream = require("../../utils/BufferWriteStream");
 const ComponentType = require("../homeassistant/ComponentType");
 const crc = require("crc");
 const DataType = require("../homie/DataType");
 const fs = require("fs");
 const HassAnchor = require("../homeassistant/HassAnchor");
 const InLineHassComponent = require("../homeassistant/components/InLineHassComponent");
+const JsonStream = require("jetsons").JsonStream;
 const Logger = require("../../Logger");
 const NodeMqttHandle = require("./NodeMqttHandle");
 const path = require("path");
 const PropertyMqttHandle = require("./PropertyMqttHandle");
+const stream = require("stream");
 const zlib = require("zlib");
 
 class MapNodeMqttHandle extends NodeMqttHandle {
@@ -157,39 +160,49 @@ class MapNodeMqttHandle extends NodeMqttHandle {
         const robot = this.robot;
 
         const promise = new Promise((resolve, reject) => {
-            zlib.deflate(JSON.stringify(robot.state.map), (err, buf) => {
-                if (err !== null) {
-                    return reject(err);
+            const mapBufferStream = new BufferWriteStream();
+
+            stream.pipeline(
+                new JsonStream(robot.state.map),
+                zlib.createDeflate(),
+                mapBufferStream,
+
+                (err) => {
+                    if (err !== null && err !== undefined) {
+                        return reject(err);
+                    }
+
+                    let payload;
+                    const buf = mapBufferStream.getBuffer();
+
+                    if (mapHack) {
+                        const length = Buffer.alloc(4);
+                        const checksum = Buffer.alloc(4);
+
+                        const textChunkData = Buffer.concat([
+                            HOMEASSISTANT_MAP_HACK.TEXT_CHUNK_TYPE,
+                            HOMEASSISTANT_MAP_HACK.TEXT_CHUNK_METADATA,
+                            buf
+                        ]);
+
+                        length.writeInt32BE(HOMEASSISTANT_MAP_HACK.TEXT_CHUNK_METADATA.length + buf.length, 0);
+                        checksum.writeUInt32BE(crc.crc32(textChunkData), 0);
+
+
+                        payload = Buffer.concat([
+                            HOMEASSISTANT_MAP_HACK.IMAGE_WITHOUT_END_CHUNK,
+                            length,
+                            textChunkData,
+                            checksum,
+                            HOMEASSISTANT_MAP_HACK.END_CHUNK
+                        ]);
+                    } else {
+                        payload = buf;
+                    }
+
+                    resolve(payload);
                 }
-                let payload;
-
-                if (mapHack) {
-                    const length = Buffer.alloc(4);
-                    const checksum = Buffer.alloc(4);
-
-                    const textChunkData = Buffer.concat([
-                        HOMEASSISTANT_MAP_HACK.TEXT_CHUNK_TYPE,
-                        HOMEASSISTANT_MAP_HACK.TEXT_CHUNK_METADATA,
-                        buf
-                    ]);
-
-                    length.writeInt32BE(HOMEASSISTANT_MAP_HACK.TEXT_CHUNK_METADATA.length + buf.length, 0);
-                    checksum.writeUInt32BE(crc.crc32(textChunkData), 0);
-
-
-                    payload = Buffer.concat([
-                        HOMEASSISTANT_MAP_HACK.IMAGE_WITHOUT_END_CHUNK,
-                        length,
-                        textChunkData,
-                        checksum,
-                        HOMEASSISTANT_MAP_HACK.END_CHUNK
-                    ]);
-                } else {
-                    payload = buf;
-                }
-
-                resolve(payload);
-            });
+            );
         });
 
         try {
